@@ -20,7 +20,14 @@ import render_resume
 from application_package import create_application_zip
 from groq_client import GROQ_MODEL, get_api_key
 
-st.set_page_config(page_title="Resume Gap Analyzer", layout="wide")
+ASSETS_DIR = ROOT / "assets"
+FAVICON_PATH = ASSETS_DIR / "boro_favicon.png"
+
+st.set_page_config(
+    page_title="BORO | Resume Gap Analyzer",
+    page_icon=str(FAVICON_PATH),
+    layout="wide",
+)
 
 # ---------------------------------------------------------------------------
 # Per-user ephemeral workspace. No candidate data is shipped with the app.
