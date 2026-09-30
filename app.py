@@ -20,14 +20,7 @@ import render_resume
 from application_package import create_application_zip
 from groq_client import GROQ_MODEL, get_api_key
 
-ASSETS_DIR = ROOT / "assets"
-FAVICON_PATH = ASSETS_DIR / "boro_favicon.png"
-
-st.set_page_config(
-    page_title="BORO | Resume Gap Analyzer",
-    page_icon=str(FAVICON_PATH),
-    layout="wide",
-)
+st.set_page_config(page_title="Resume Gap Analyzer", layout="wide")
 
 # ---------------------------------------------------------------------------
 # Per-user ephemeral workspace. No candidate data is shipped with the app.
@@ -46,6 +39,7 @@ MASTER_CONTENT = PROFILE_DIR / "master_content.yaml"
 MASTER_PROJECT_DETAILS = PROFILE_DIR / "master_project_details.yaml"
 MASTER_STYLE = PROFILE_DIR / "master_style.yaml"
 MASTER_TEMPLATE = PROFILE_DIR / "master_template.html"
+SOURCE_RESUME = PROFILE_DIR / "original_resume"
 
 
 def sanitize_name(name: str) -> str:
@@ -83,6 +77,15 @@ def create_application(company: str, role: str = "") -> Path:
         new_dir = APPLICATIONS_DIR / f"{folder_name}_{uuid.uuid4().hex[:6]}"
 
     new_dir.mkdir(parents=True)
+
+    # Keep the original uploaded resume as source material for this application.
+    # The uploaded source may have a .pdf/.docx/.txt suffix, so locate it
+    # after a Streamlit rerun rather than relying on a transient local variable.
+    source_candidates = sorted(PROFILE_DIR.glob("original_resume.*"))
+    if source_candidates:
+        source_resume = source_candidates[0]
+        shutil.copy2(source_resume, new_dir / source_resume.name)
+
     return new_dir
 
 
@@ -215,6 +218,15 @@ if not profile_ready():
 
                     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
+                    # Preserve the exact uploaded resume as immutable source material.
+                    # The generated/edited CV PDF is rendered separately from content.yaml.
+                    resume_suffix = Path(uploaded_resume.name).suffix.lower() or ".bin"
+                    source_resume_path = PROFILE_DIR / f"original_resume{resume_suffix}"
+                    for old_source in PROFILE_DIR.glob("original_resume.*"):
+                        old_source.unlink(missing_ok=True)
+                    source_resume_path.write_bytes(uploaded_resume.getvalue())
+                    SOURCE_RESUME = source_resume_path
+
                     # ONE Groq call. The optional DOCX is included when supplied.
                     profile, projects = jd_analyzer.generate_profile_bundle(
                         resume_text,
@@ -304,30 +316,41 @@ with st.sidebar:
         index=default,
     )
 
-    if choice == "— New application —":
-        with st.form("new_application"):
-            company = st.text_input("Company name")
-            role = st.text_input("Role")
-            create = st.form_submit_button("Create application")
-
-        if create:
-            if not company.strip():
-                st.error("Company name is required.")
-            else:
-                app_dir = create_application(company, role)
-                st.session_state.selected_app_name = app_dir.name
-                st.rerun()
-
-        st.stop()
-    else:
+    if choice != "— New application —":
         app_dir = APPLICATIONS_DIR / choice
         st.session_state.selected_app_name = choice
+    else:
+        app_dir = None
 
     st.caption(
         "Your generated profile is kept in this session workspace and is not "
         "part of the public source repository."
     )
 
+
+if app_dir is None:
+    st.title("🚀 Create a new application to start")
+    st.info(
+        "No job application is selected yet. Create a new application below "
+        "to start the Job Description → ATS analysis → resume workflow."
+    )
+
+    with st.form("create_application_main"):
+        st.markdown("### Create new application")
+        company = st.text_input("Company name")
+        role = st.text_input("Role (optional)")
+        create = st.form_submit_button("➕ Create application", type="primary")
+
+    if create:
+        if not company.strip():
+            st.error("Company name is required.")
+        else:
+            new_app = create_application(company, role)
+            st.session_state.selected_app_name = new_app.name
+            st.success(f"Created {new_app.name}. You can now open the Job Description tab.")
+            st.rerun()
+
+    st.stop()
 
 st.subheader(app_dir.name)
 
@@ -427,7 +450,7 @@ with tab_jd:
                     )
 
                     st.success(
-                        f"Done — match score {analysis['match_score']}/100."
+                        f"Done — deterministic ATS score {analysis['match_score']}/100."
                     )
                 except Exception as e:
                     st.error(f"Analysis failed: {e}")
@@ -446,23 +469,16 @@ with tab_report:
         else:
             st.info("Run Gap Analysis first.")
     else:
-        # -------------------------------------------------------------------
-        # Deterministic ATS score dashboard
-        # -------------------------------------------------------------------
-        st.subheader("ATS Match Score")
-        score = analysis["match_score"]
+        st.metric("ATS Match Score", f"{analysis['match_score']}/100")
+        st.caption(analysis["match_score_rationale"])
 
-        score_col, method_col = st.columns([1, 2])
-        with score_col:
-            st.metric("Overall Match Score", f"{score}/100")
-        with method_col:
-            st.info(
-                "Score calculated deterministically from structured JD evidence. "
-                "Groq evaluates the evidence; Python calculates the final score."
-            )
+        st.markdown("### 📊 Deterministic ATS Score Breakdown")
+        st.caption(
+            "Groq evaluates evidence; Python calculates the final score. "
+            "The model does not directly choose the /100 score."
+        )
 
-        breakdown = analysis.get("score_breakdown", {})
-        labels = {
+        score_labels = {
             "hard_requirements": "Hard requirements",
             "skills_technologies": "Skills / technologies",
             "experience_alignment": "Experience alignment",
@@ -471,72 +487,38 @@ with tab_report:
             "education_credentials": "Education / credentials",
         }
 
-        if breakdown:
-            st.markdown("### Score breakdown")
-
-            header = st.columns([3, 1, 1, 1])
-            header[0].markdown("**Dimension**")
-            header[1].markdown("**Weight**")
-            header[2].markdown("**Score**")
-            header[3].markdown("**Contribution**")
-
-            for dimension, details in breakdown.items():
-                cols = st.columns([3, 1, 1, 1])
-                cols[0].write(labels.get(dimension, dimension))
-                cols[1].write(f"{details['weight']}%")
-                cols[2].write(f"{details['score']:.0f}/100")
-                cols[3].write(f"{details['weighted_score']:.1f}")
-
-            st.caption(
-                "Status scoring: met = 100%, partial = 50%, not met = 0%. "
-                "Requirement importance also applies deterministic weighting."
-            )
-
-        st.markdown("### Score rationale")
-        st.write(analysis["match_score_rationale"])
-
-        st.markdown("### Requirement evidence")
-        requirements = analysis.get("requirements", [])
-
-        if requirements:
-            req_labels = {
-                "hard_requirements": "Hard requirements",
-                "skills_technologies": "Skills / technologies",
-                "experience_alignment": "Experience alignment",
-                "responsibilities": "Responsibilities",
-                "keywords": "Keywords",
-                "education_credentials": "Education / credentials",
-            }
-
-            for item in requirements:
-                status = item.get("status", "").replace("_", " ").title()
-                dimension = req_labels.get(
-                    item.get("dimension", ""),
-                    item.get("dimension", ""),
+        breakdown = analysis.get("score_breakdown", {})
+        for dimension, details in breakdown.items():
+            label = score_labels.get(dimension, dimension)
+            col_a, col_b, col_c = st.columns([4, 1, 2])
+            with col_a:
+                st.write(f"**{label}**")
+            with col_b:
+                st.write(f"{details['weight']}%")
+            with col_c:
+                st.write(
+                    f"{details['score']:.0f}/100 "
+                    f"→ {details['weighted_score']:.1f}"
                 )
-                with st.expander(
-                    f"{status} — {item.get('requirement', 'Requirement')}"
-                ):
-                    st.markdown(f"**Dimension:** {dimension}")
-                    st.markdown(
-                        f"**Importance:** {item.get('importance', '—')}"
-                    )
-                    st.markdown(f"**Status:** {status}")
-                    st.markdown(
-                        f"**Evidence:** {item.get('evidence', '—')}"
-                    )
-                    st.markdown(
-                        f"**Source:** {item.get('source', '—')}"
-                    )
-                    matched = item.get("matched_terms", [])
-                    if matched:
-                        st.markdown(
-                            f"**Matched terms:** {', '.join(matched)}"
-                        )
 
-        st.divider()
+        with st.expander("🔎 Requirement evidence used for scoring"):
+            for item in analysis.get("requirements", []):
+                status_icon = {
+                    "met": "✅",
+                    "partial": "🟡",
+                    "not_met": "❌",
+                    "not_applicable": "⚪",
+                }.get(item["status"], "•")
+                st.markdown(
+                    f"{status_icon} **{item['requirement']}** — "
+                    f"{item['status'].replace('_', ' ')}"
+                )
+                st.caption(
+                    f"{item['dimension'].replace('_', ' ')} · "
+                    f"{item['importance']} · {item['evidence']}"
+                )
 
-        st.markdown("### Missing keywords / requirements")
+        st.markdown("**Missing keywords / requirements**")
         st.write(
             ", ".join(analysis["missing_keywords"])
             if analysis["missing_keywords"]
@@ -680,7 +662,7 @@ with tab_content:
                     )
 
                     st.success(
-                        f"ATS analysis updated — match score "
+                        f"ATS analysis updated — deterministic ATS score "
                         f"{analysis['match_score']}/100. "
                         f"Open the Gap Report tab to see the result."
                     )
@@ -697,6 +679,41 @@ with tab_content:
 # ---------------------------------------------------------------------------
 # Render PDF
 # ---------------------------------------------------------------------------
+def safe_pdf_name(name: str, app_dir: Path) -> str:
+    clean = Path(name).name.strip()
+    if not clean:
+        clean = f"Resume_{app_dir.name}.pdf"
+    if not clean.lower().endswith(".pdf"):
+        clean += ".pdf"
+    return clean
+
+
+def render_current_resume(app_dir: Path, out_path: Path) -> Path:
+    """Always render the current content/style/template into out_path."""
+    content_path = ensure_local_content(app_dir)
+    content = render_resume.load_yaml(content_path)
+    style = render_resume.load_yaml(MASTER_STYLE)
+    render_resume.render_pdf(
+        content,
+        style,
+        MASTER_TEMPLATE,
+        out_path,
+    )
+    return out_path
+
+
+def pdf_needs_refresh(pdf_path: Path, app_dir: Path) -> bool:
+    if not pdf_path.exists():
+        return True
+    sources = [
+        ensure_local_content(app_dir),
+        MASTER_STYLE,
+        MASTER_TEMPLATE,
+    ]
+    pdf_mtime = pdf_path.stat().st_mtime_ns
+    return any(path.exists() and path.stat().st_mtime_ns > pdf_mtime for path in sources)
+
+
 with tab_render:
     content_path = ensure_local_content(app_dir)
 
@@ -704,42 +721,54 @@ with tab_render:
         "Output filename",
         value=f"Resume_{app_dir.name}.pdf",
     )
+    out_name = safe_pdf_name(out_name, app_dir)
 
     if st.button("🖨️ Render PDF", type="primary"):
         try:
-            with st.spinner("Rendering PDF..."):
-                content = render_resume.load_yaml(content_path)
-                style = render_resume.load_yaml(MASTER_STYLE)
+            with st.spinner("Rendering the current edited resume PDF..."):
                 out_path = app_dir / out_name
-
-                render_resume.render_pdf(
-                    content,
-                    style,
-                    MASTER_TEMPLATE,
-                    out_path,
-                )
-
+                render_current_resume(app_dir, out_path)
                 st.session_state[f"last_pdf_{app_dir}"] = str(out_path)
-
-            st.success("PDF rendered.")
+                st.session_state[f"last_pdf_mtime_{app_dir}"] = out_path.stat().st_mtime_ns
+            st.success(
+                "PDF updated from the current content.yaml. "
+                "The original uploaded resume remains unchanged as source material."
+            )
         except Exception as e:
             st.error(f"PDF rendering failed: {e}")
 
     last_pdf = st.session_state.get(f"last_pdf_{app_dir}")
+    if last_pdf:
+        last_pdf_path = Path(last_pdf)
+    else:
+        last_pdf_path = app_dir / out_name
 
-    if last_pdf and Path(last_pdf).exists():
-        pdf_bytes = Path(last_pdf).read_bytes()
+    if last_pdf_path.exists():
+        # Always make the downloadable PDF current before exposing either
+        # download button. This prevents stale PDFs in both downloads after
+        # content.yaml/style/template edits.
+        try:
+            if pdf_needs_refresh(last_pdf_path, app_dir):
+                with st.spinner("Updating the CV PDF from the latest edits..."):
+                    render_current_resume(app_dir, last_pdf_path)
+                    st.session_state[f"last_pdf_mtime_{app_dir}"] = last_pdf_path.stat().st_mtime_ns
+        except Exception as e:
+            st.error(f"Could not refresh the current CV PDF: {e}")
+            st.stop()
+
+        pdf_bytes = last_pdf_path.read_bytes()
 
         st.download_button(
             "⬇️ Download PDF",
             data=pdf_bytes,
-            file_name=Path(last_pdf).name,
+            file_name=last_pdf_path.name,
             mime="application/pdf",
         )
 
         st.divider()
         st.subheader("📦 Complete Job Application")
 
+        # Build the ZIP only after the current CV has been refreshed.
         try:
             application_zip = create_application_zip(app_dir)
 
@@ -750,14 +779,14 @@ with tab_render:
                 mime="application/zip",
                 type="primary",
                 help=(
-                    "Downloads the complete selected application folder, "
-                    "including the rendered CV, JD, gap analysis, study notes, "
-                    "content.yaml and any other application-specific files."
+                    "Downloads the complete current application, including "
+                    "the latest rendered CV, original uploaded resume, JD, "
+                    "gap analysis, study notes and edited content.yaml."
                 ),
             )
-
             st.caption(
-                "Packages the complete selected application folder into one ZIP."
+                "The ZIP always contains the latest rendered CV. "
+                "The original uploaded resume is kept separately as source material."
             )
         except Exception as e:
             st.error(f"Could not create application package: {e}")
@@ -765,12 +794,17 @@ with tab_render:
         try:
             import fitz
 
-            doc = fitz.open(last_pdf)
+            doc = fitz.open(last_pdf_path)
             pix = doc[0].get_pixmap(dpi=110)
-            st.caption(f"{len(doc)} page(s)")
+            st.caption(f"{len(doc)} page(s) — current rendered CV")
             st.image(pix.tobytes("png"), width=650)
         except Exception:
             pass
+    else:
+        st.info(
+            "No rendered CV yet. Edit your content if needed, then click "
+            "**🖨️ Render PDF** to create the current resume PDF."
+        )
 
 
 # ---------------------------------------------------------------------------
