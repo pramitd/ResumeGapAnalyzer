@@ -446,10 +446,97 @@ with tab_report:
         else:
             st.info("Run Gap Analysis first.")
     else:
-        st.metric("Match Score", f"{analysis['match_score']}/100")
-        st.caption(analysis["match_score_rationale"])
+        # -------------------------------------------------------------------
+        # Deterministic ATS score dashboard
+        # -------------------------------------------------------------------
+        st.subheader("ATS Match Score")
+        score = analysis["match_score"]
 
-        st.markdown("**Missing keywords / requirements**")
+        score_col, method_col = st.columns([1, 2])
+        with score_col:
+            st.metric("Overall Match Score", f"{score}/100")
+        with method_col:
+            st.info(
+                "Score calculated deterministically from structured JD evidence. "
+                "Groq evaluates the evidence; Python calculates the final score."
+            )
+
+        breakdown = analysis.get("score_breakdown", {})
+        labels = {
+            "hard_requirements": "Hard requirements",
+            "skills_technologies": "Skills / technologies",
+            "experience_alignment": "Experience alignment",
+            "responsibilities": "Responsibilities",
+            "keywords": "Keywords",
+            "education_credentials": "Education / credentials",
+        }
+
+        if breakdown:
+            st.markdown("### Score breakdown")
+
+            header = st.columns([3, 1, 1, 1])
+            header[0].markdown("**Dimension**")
+            header[1].markdown("**Weight**")
+            header[2].markdown("**Score**")
+            header[3].markdown("**Contribution**")
+
+            for dimension, details in breakdown.items():
+                cols = st.columns([3, 1, 1, 1])
+                cols[0].write(labels.get(dimension, dimension))
+                cols[1].write(f"{details['weight']}%")
+                cols[2].write(f"{details['score']:.0f}/100")
+                cols[3].write(f"{details['weighted_score']:.1f}")
+
+            st.caption(
+                "Status scoring: met = 100%, partial = 50%, not met = 0%. "
+                "Requirement importance also applies deterministic weighting."
+            )
+
+        st.markdown("### Score rationale")
+        st.write(analysis["match_score_rationale"])
+
+        st.markdown("### Requirement evidence")
+        requirements = analysis.get("requirements", [])
+
+        if requirements:
+            req_labels = {
+                "hard_requirements": "Hard requirements",
+                "skills_technologies": "Skills / technologies",
+                "experience_alignment": "Experience alignment",
+                "responsibilities": "Responsibilities",
+                "keywords": "Keywords",
+                "education_credentials": "Education / credentials",
+            }
+
+            for item in requirements:
+                status = item.get("status", "").replace("_", " ").title()
+                dimension = req_labels.get(
+                    item.get("dimension", ""),
+                    item.get("dimension", ""),
+                )
+                with st.expander(
+                    f"{status} — {item.get('requirement', 'Requirement')}"
+                ):
+                    st.markdown(f"**Dimension:** {dimension}")
+                    st.markdown(
+                        f"**Importance:** {item.get('importance', '—')}"
+                    )
+                    st.markdown(f"**Status:** {status}")
+                    st.markdown(
+                        f"**Evidence:** {item.get('evidence', '—')}"
+                    )
+                    st.markdown(
+                        f"**Source:** {item.get('source', '—')}"
+                    )
+                    matched = item.get("matched_terms", [])
+                    if matched:
+                        st.markdown(
+                            f"**Matched terms:** {', '.join(matched)}"
+                        )
+
+        st.divider()
+
+        st.markdown("### Missing keywords / requirements")
         st.write(
             ", ".join(analysis["missing_keywords"])
             if analysis["missing_keywords"]
